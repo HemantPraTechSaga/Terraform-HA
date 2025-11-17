@@ -7,11 +7,11 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  depends_on = [aws_default_vpc.default]
 
   tags = {
     Name = "Project VPC"
   }
+  depends_on = [aws_default_vpc.default]
 }
 
 resource "aws_subnet" "public_subnets" {
@@ -156,7 +156,7 @@ resource "aws_security_group" "bastion_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # ⚠ Testing only — replace with your IP later
+    cidr_blocks = ["0.0.0.0/0"] 
   }
 
   egress {
@@ -173,11 +173,15 @@ resource "aws_security_group" "bastion_sg" {
 
 
 resource "aws_launch_template" "app_lt" {
-  name_prefix   = "app-lt"
-  
+  name_prefix = "app-lt"
+
   image_id      = var.ec2_ami
   instance_type = var.ec2_type
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "optional" # for testing
+  }
 
   vpc_security_group_ids = tolist(aws_security_group.private_sg[*].id)
 
@@ -194,7 +198,7 @@ resource "aws_autoscaling_group" "app_asg" {
   max_size         = 5
   desired_capacity = 2
 
-  vpc_security_group_ids = [aws_security_group.private_sg.id]
+  vpc_zone_identifier = aws_subnet.private_subnets[*].id
 
 
   health_check_type         = "EC2"
@@ -222,7 +226,84 @@ resource "aws_instance" "bastion" {
 
   associate_public_ip_address = true
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "optional" # or required
+  }
+
   tags = {
     Name = "Bastion-Host"
   }
+}
+
+resource "aws_security_group" "alb_sg" {
+  name        = "alb-sg"
+  description = "Allow HTTP to ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "ALB-SG"
+  }
+}
+
+resource "aws_lb" "app_alb" {
+  name               = "app-alb"
+  load_balancer_type = "application"
+  subnets            = aws_subnet.public_subnets[*].id
+  security_groups    = [aws_security_group.alb_sg.id]
+
+  tags = {
+    Name = "App-ALB"
+  }
+}
+
+resource "aws_lb_target_group" "app_tg" {
+  name     = "app-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    path                = "/"
+    port                = "80"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 10
+    matcher             = "200"
+  }
+
+  tags = {
+    Name = "App-TG"
+  }
+}
+
+resource "aws_lb_listener" "http_listener" {
+  load_balancer_arn = aws_lb.app_alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+resource "aws_autoscaling_attachment" "asg_tg" {
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  lb_target_group_arn    = aws_lb_target_group.app_tg.arn
 }
